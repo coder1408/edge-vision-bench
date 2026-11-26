@@ -1,0 +1,30 @@
+# Local data and telemetry
+data/
+
+# Model weights and compiled runtime artifacts
+models/artifacts/
+models/weights/
+*.engine
+*.onnx
+*.pt
+*.pth
+*.bin
+*.xml
+*.cache
+
+# Keep results/*.json and results/*.md trackable (do not ignore results/)
+
+# Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+.env

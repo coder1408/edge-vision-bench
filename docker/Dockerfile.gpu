@@ -1,0 +1,67 @@
+# syntax=docker/dockerfile:1.7
+
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS builder
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3.11 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /build
+COPY pyproject.toml ./
+COPY src ./src
+
+RUN pip install --upgrade pip wheel setuptools \
+    && pip install --index-url https://download.pytorch.org/whl/cu124 torch torchvision \
+    && pip install ".[gpu]"
+
+
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    LD_LIBRARY_PATH="/opt/venv/lib/python3.11/site-packages/tensorrt_libs:/opt/venv/lib/python3.11/site-packages/nvidia/cudnn/lib:/opt/venv/lib/python3.11/site-packages/nvidia/cublas/lib:${LD_LIBRARY_PATH}" \
+    EVB_CONFIG="/app/configs/yolox_s_sportsmot.yaml" \
+    EVB_RUNTIME="tensorrt" \
+    EVB_PRECISION="fp16" \
+    EVB_DEVICE="cuda" \
+    EVB_RESULTS_DIR="/app/results"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 10001 evb \
+    && useradd --uid 10001 --gid evb --shell /usr/sbin/nologin --create-home evb
+
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
+COPY configs ./configs
+
+RUN mkdir -p /app/models/artifacts /app/models/weights /app/results \
+    && chown -R evb:evb /app
+
+USER evb
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+
+CMD ["uvicorn", "edge_vision_bench.api.app:app", "--host", "0.0.0.0", "--port", "8000"]

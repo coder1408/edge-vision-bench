@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "edge-vision-bench"
+version = "0.1.0"
+description = "Cross-runtime edge vision deployment, parity verification, and benchmarking suite."
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "numpy>=1.24,<2.3",
+    "opencv-python-headless>=4.8",
+    "pydantic>=2.7",
+    "typer>=0.12",
+    "rich>=13.7",
+    "pyyaml>=6.0",
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "scipy>=1.11",
+    "psutil>=5.9",
+    "timm>=1.0",
+    "onnx>=1.16",
+    "pycocotools>=2.0.7",
+    "motmetrics>=1.4.0",
+]
+
+[project.optional-dependencies]
+cpu = [
+    "onnxruntime>=1.18",
+    "openvino>=2024.3",
+    "nncf>=2.11",
+]
+gpu = [
+    "onnxruntime-gpu>=1.18",
+    "tensorrt>=10.0",
+    "cuda-python>=12.4",
+    "nvidia-ml-py>=12.535",
+]
+simplify = [
+    "onnxsim>=0.4.36",
+]
+dev = [
+    "pytest>=8.2",
+    "httpx>=0.27",
+    "ruff>=0.5",
+    "mypy>=1.10",
+    "types-PyYAML>=6.0",
+    "types-psutil>=5.9",
+]
+
+[project.scripts]
+evb = "edge_vision_bench.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/edge_vision_bench"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests requiring an NVIDIA GPU and CUDA/TensorRT",
+]

@@ -1,0 +1,33 @@
+[
+  {
+    "model_name": "yolox-s",
+    "track": "detection",
+    "runtime": "openvino",
+    "precision": "fp16",
+    "hardware_target": "AMD Ryzen 7 5800HS with Radeon Graphics",
+    "batch_size": 1,
+    "p50_compute_ms": 58.5538,
+    "p95_compute_ms": 61.7017,
+    "p99_compute_ms": 61.8245,
+    "p50_h2d_ms": 0.0,
+    "p50_d2h_ms": 0.0,
+    "p50_preproc_ms": 3.0724,
+    "p50_postproc_ms": 1.5915,
+    "end_to_end_fps": 15.7,
+    "peak_vram_mb": 0.0,
+    "peak_ram_mb": 699.77,
+    "artifact_size_mb": 17.486,
+    "clean_map50_95": null,
+    "clean_map50": null,
+    "ood_blur_map50_95": null,
+    "ood_occlusion_map50_95": null,
+    "ood_lowlight_map50_95": null,
+    "clean_mota": null,
+    "clean_idf1": null,
+    "ood_blur_mota": null,
+    "embedding_cosine_sim": null,
+    "ood_blur_cosine_sim": null,
+    "ood_occlusion_cosine_sim": null,
+    "ood_lowlight_cosine_sim": null
+  }
+]

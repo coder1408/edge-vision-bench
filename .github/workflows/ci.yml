@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-and-tests:
+    name: Lint, Typecheck & Unit Tests (CPU)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+
+      - name: Install CPU PyTorch and package extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+          pip install -e ".[cpu,dev]"
+
+      - name: Ruff lint
+        run: ruff check src tests
+
+      - name: Ruff format check
+        run: ruff format --check src tests
+
+      - name: Mypy static type check
+        run: mypy src
+
+      - name: Pytest (fast CPU suite)
+        run: pytest -v -m "not slow and not gpu"
+
+  docker-cpu-build:
+    name: Docker CPU Image Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build CPU Docker image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.cpu
+          push: false
+          load: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
