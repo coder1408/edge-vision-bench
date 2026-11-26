@@ -496,7 +496,7 @@ def _normalize_variant(variant: str) -> str:
     return normalized
 
 
-def _download_weights(url: str, dest: Path, timeout: float = 15.0) -> Path:
+def _download_weights(url: str, dest: Path, timeout: float = 60.0) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = dest.with_suffix(dest.suffix + ".tmp")
     logger.info("Downloading YOLOX weights from %s to %s", url, dest)

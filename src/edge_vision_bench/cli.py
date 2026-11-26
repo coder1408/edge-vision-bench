@@ -846,3 +846,7 @@ def report_cmd(
         f"[green]Merged {len(collected)} benchmark result(s) from {len(json_files)} JSON file(s) "
         f"into {output}[/green]"
     )
+
+
+if __name__ == "__main__":
+    app()
