@@ -25,7 +25,9 @@ except ImportError:
     except ImportError:
         cudart = None
 
-_CalibratorBase: Any = trt.IInt8EntropyCalibrator2 if trt is not None else object
+_CalibratorBase: Any = (
+    getattr(trt, "IInt8EntropyCalibrator2", object) if trt is not None else object
+)
 
 
 def _check_cuda(result: Any, operation: str) -> Any:
@@ -60,6 +62,11 @@ class EntropyCalibrator(_CalibratorBase):  # type: ignore[misc]
             raise RuntimeError(
                 "TensorRT and cuda-python are only available on CUDA GPU hosts. "
                 "Install the `gpu` extra (`pip install -e '.[gpu]'`) on a CUDA-capable host."
+            )
+        if not hasattr(trt, "IInt8EntropyCalibrator2"):
+            raise RuntimeError(
+                "TensorRT 11+ removed IInt8EntropyCalibrator2 and uses explicit Q/DQ INT8 ONNX "
+                "quantization instead. Use build_trt_engine() or quantize_onnx_qdq_int8()."
             )
         if batch_size < 1:
             raise ValueError(f"batch_size must be >= 1, got {batch_size}")

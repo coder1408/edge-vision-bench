@@ -1,13 +1,16 @@
-"""TensorRT 10.x serialized engine builder supporting FP32, FP16, and INT8."""
+"""TensorRT 10.x and 11.x serialized engine builder supporting FP32, FP16, and INT8."""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+import onnx
 
+from edge_vision_bench.export.onnx_exporter import convert_onnx_to_fp16
 from edge_vision_bench.export.trt_calibrator import EntropyCalibrator
 from edge_vision_bench.schemas import PrecisionName
 
@@ -23,6 +26,103 @@ def _noop_preprocess(path: Path) -> np.ndarray:
     raise RuntimeError(f"preprocess_fn was not provided while attempting to calibrate using {path}")
 
 
+def quantize_onnx_qdq_int8(
+    onnx_path: Path,
+    output_path: Path,
+    calibration_frames: list[Path],
+    preprocess_fn: Callable[[Path], np.ndarray],
+    input_shape: tuple[int, int, int],
+) -> Path:
+    """Quantize an FP32 ONNX graph to an explicit symmetric Q/DQ INT8 ONNX graph.
+
+    Used for TensorRT 11+ strongly-typed explicit INT8 engine builds where legacy
+    ``IInt8EntropyCalibrator2`` calibration has been removed.
+
+    Args:
+        onnx_path: Source FP32 ``.onnx`` model file.
+        output_path: Destination Q/DQ INT8 ``.onnx`` file.
+        calibration_frames: Representative image paths for entropy calibration.
+        preprocess_fn: Function mapping an image path to a ``(C, H, W)`` or ``(1, C, H, W)``
+            float32 array matching the model's expected preprocessing.
+        input_shape: Expected spatial input shape ``(C, H, W)`` without batch dimension.
+
+    Returns:
+        Path to the verified Q/DQ INT8 ONNX graph.
+    """
+    src = Path(onnx_path)
+    dest = Path(output_path)
+    if not src.exists():
+        raise FileNotFoundError(f"ONNX model not found: {src}")
+    if not calibration_frames:
+        raise ValueError("calibration_frames must be non-empty for Q/DQ INT8 quantization")
+
+    from onnxruntime.quantization import (
+        CalibrationDataReader,
+        CalibrationMethod,
+        QuantFormat,
+        QuantType,
+        quantize_static,
+    )
+
+    proto = onnx.load(str(src), load_external_data=False)
+    input_name = proto.graph.input[0].name
+    frames = [Path(frame) for frame in calibration_frames]
+
+    class _FrameCalibrationReader(CalibrationDataReader):  # type: ignore[misc]
+        def __init__(self) -> None:
+            self._index = 0
+
+        def get_next(self) -> dict[str, np.ndarray] | None:
+            if self._index >= len(frames):
+                return None
+            frame_path = frames[self._index]
+            self._index += 1
+            arr = np.asarray(preprocess_fn(frame_path), dtype=np.float32)
+            if arr.ndim == 3:
+                if arr.shape != input_shape:
+                    raise ValueError(
+                        f"Preprocessed calibration frame {frame_path} has shape {arr.shape}, "
+                        f"expected {input_shape}"
+                    )
+                arr = arr[np.newaxis, ...]
+            elif arr.ndim == 4 and arr.shape[0] == 1:
+                if arr.shape[1:] != input_shape:
+                    raise ValueError(
+                        f"Preprocessed calibration frame {frame_path} has shape {arr.shape}, "
+                        f"expected (1, {input_shape[0]}, {input_shape[1]}, {input_shape[2]})"
+                    )
+            else:
+                raise ValueError(
+                    f"Preprocessed calibration frame {frame_path} has unsupported shape "
+                    f"{arr.shape}; expected {input_shape} or (1, *input_shape)"
+                )
+            return {input_name: np.ascontiguousarray(arr, dtype=np.float32)}
+
+        def rewind(self) -> None:
+            self._index = 0
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "Quantizing %s to explicit Q/DQ INT8 ONNX (%d calibration frames) -> %s",
+        src,
+        len(frames),
+        dest,
+    )
+    quantize_static(
+        model_input=str(src),
+        model_output=str(dest),
+        calibration_data_reader=_FrameCalibrationReader(),
+        quant_format=QuantFormat.QDQ,
+        activation_type=QuantType.QInt8,
+        weight_type=QuantType.QInt8,
+        calibrate_method=CalibrationMethod.Entropy,
+        op_types_to_quantize=["Conv", "MatMul", "Gemm"],
+        extra_options={"ActivationSymmetric": True, "WeightSymmetric": True},
+    )
+    onnx.checker.check_model(str(dest))
+    return dest
+
+
 def build_trt_engine(
     onnx_path: str | Path,
     engine_path: str | Path,
@@ -36,7 +136,12 @@ def build_trt_engine(
     cache_file: Path | None = None,
     workspace_mb: int = 2048,
 ) -> Path:
-    """Compile an ONNX model into a serialized TensorRT 10.x ``.engine`` plan file.
+    """Compile an ONNX model into a serialized TensorRT 10.x or 11.x ``.engine`` plan file.
+
+    On TensorRT 10.x, FP16/INT8 engines use ``BuilderFlag.FP16``/``BuilderFlag.INT8`` and
+    ``EntropyCalibrator``. On TensorRT 11.x (strongly-typed networks without legacy builder flags
+    or ``IInt8EntropyCalibrator2``), FP16 parses an FP16 ONNX graph and INT8 parses an explicit
+    symmetric Q/DQ INT8 ONNX graph.
 
     Args:
         onnx_path: Source ``.onnx`` model file.
@@ -49,7 +154,7 @@ def build_trt_engine(
         calibration_frames: Image paths used for INT8 entropy calibration.
         preprocess_fn: Function mapping an image path to a ``(C, H, W)`` or ``(1, C, H, W)``
             float32 array matching the model's expected preprocessing.
-        cache_file: Optional calibration cache file path for INT8 builds.
+        cache_file: Optional calibration cache file path for legacy TensorRT 10.x INT8 builds.
         workspace_mb: TensorRT builder workspace limit in MiB.
 
     Returns:
@@ -58,7 +163,7 @@ def build_trt_engine(
     if trt is None:
         raise RuntimeError(
             "TensorRT is only available on CUDA GPU hosts. Install the `gpu` extra "
-            "(`pip install -e '.[gpu]'`) on an NVIDIA GPU host with TensorRT 10.x."
+            "(`pip install -e '.[gpu]'`) on an NVIDIA GPU host with TensorRT 10.x/11.x."
         )
 
     src = Path(onnx_path)
@@ -73,20 +178,58 @@ def build_trt_engine(
             f"got ({min_batch}, {opt_batch}, {max_batch})"
         )
 
+    builder_flag_enum: Any = getattr(trt, "BuilderFlag", None)
+    has_legacy_fp16 = builder_flag_enum is not None and hasattr(builder_flag_enum, "FP16")
+    has_legacy_int8 = (
+        builder_flag_enum is not None
+        and hasattr(builder_flag_enum, "INT8")
+        and hasattr(trt, "IInt8EntropyCalibrator2")
+    )
+
+    parse_src = src
+    if precision == "fp16" and not has_legacy_fp16:
+        if src.stem.endswith("_fp16"):
+            parse_src = src
+        else:
+            fp16_path = src.with_name(f"{src.stem}_fp16.onnx")
+            if not fp16_path.exists():
+                convert_onnx_to_fp16(src, fp16_path)
+            parse_src = fp16_path
+    elif precision == "int8" and not has_legacy_int8:
+        if src.stem.endswith("_int8_qdq"):
+            parse_src = src
+        else:
+            qdq_path = src.with_name(f"{src.stem}_int8_qdq.onnx")
+            if not qdq_path.exists():
+                if not calibration_frames or preprocess_fn is None:
+                    raise ValueError(
+                        "TensorRT 11+ INT8 build requires either an existing Q/DQ ONNX model "
+                        "or both calibration_frames and preprocess_fn."
+                    )
+                quantize_onnx_qdq_int8(
+                    onnx_path=src,
+                    output_path=qdq_path,
+                    calibration_frames=list(calibration_frames),
+                    preprocess_fn=preprocess_fn,
+                    input_shape=input_shape,
+                )
+            parse_src = qdq_path
+
     trt_logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(trt_logger)
 
+    flags_enum: Any = getattr(trt, "NetworkDefinitionCreationFlag", None)
     explicit_batch = (
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-        if hasattr(trt.NetworkDefinitionCreationFlag, "EXPLICIT_BATCH")
+        1 << int(flags_enum.EXPLICIT_BATCH)
+        if (flags_enum is not None and hasattr(flags_enum, "EXPLICIT_BATCH"))
         else 0
     )
     network = builder.create_network(explicit_batch)
     parser = trt.OnnxParser(network, trt_logger)
 
-    if not parser.parse_from_file(str(src)):
+    if not parser.parse_from_file(str(parse_src)):
         errors = [str(parser.get_error(i)) for i in range(parser.num_errors)]
-        raise RuntimeError(f"Failed to parse ONNX graph {src}: {'; '.join(errors)}")
+        raise RuntimeError(f"Failed to parse ONNX graph {parse_src}: {'; '.join(errors)}")
 
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_mb * (1 << 20))
@@ -103,9 +246,9 @@ def build_trt_engine(
 
     calibrator: EntropyCalibrator | None = None
     try:
-        if precision == "fp16":
+        if precision == "fp16" and has_legacy_fp16:
             config.set_flag(trt.BuilderFlag.FP16)
-        elif precision == "int8":
+        elif precision == "int8" and has_legacy_int8:
             resolved_cache = (
                 Path(cache_file) if cache_file is not None else dest.with_suffix(".calib.cache")
             )
@@ -145,7 +288,7 @@ def build_trt_engine(
         logger.info(
             "Building TensorRT %s engine from %s (profile batch=%d/%d/%d, shape=%s)",
             precision.upper(),
-            src,
+            parse_src,
             min_batch,
             opt_batch,
             max_batch,
@@ -153,7 +296,7 @@ def build_trt_engine(
         )
         serialized_engine = builder.build_serialized_network(network, config)
         if serialized_engine is None:
-            raise RuntimeError(f"TensorRT failed to build serialized engine for {src}")
+            raise RuntimeError(f"TensorRT failed to build serialized engine for {parse_src}")
 
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(bytes(serialized_engine))

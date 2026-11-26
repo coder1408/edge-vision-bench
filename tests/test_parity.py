@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +23,7 @@ from edge_vision_bench.export.onnx_exporter import (
     verify_onnx_parity,
 )
 from edge_vision_bench.export.openvino_exporter import export_to_openvino
-from edge_vision_bench.export.trt_builder import build_trt_engine
+from edge_vision_bench.export.trt_builder import build_trt_engine, quantize_onnx_qdq_int8
 from edge_vision_bench.export.trt_calibrator import EntropyCalibrator
 from edge_vision_bench.models.dinov2 import load_dinov2
 from edge_vision_bench.models.yolox import YOLOXModel, load_yolox
@@ -375,6 +378,7 @@ def test_trt_int8_dedicated_calibration_profile(
         Logger = _FakeLogger
         Builder = _FakeBuilder
         OnnxParser = _FakeParser
+        IInt8EntropyCalibrator2 = object
 
         class NetworkDefinitionCreationFlag:
             EXPLICIT_BATCH = 0
@@ -442,6 +446,194 @@ def test_trt_int8_dedicated_calibration_profile(
         (2, 3, 160, 160),
     )
     assert {"int8", "fp16"} <= cfg.flags
+
+
+def test_quantize_onnx_qdq_int8_yolox(
+    yolox_tiny_artifacts: tuple[YOLOXModel, Path],
+    tmp_path: Path,
+) -> None:
+    """Quantize tiny YOLOX ONNX to Q/DQ INT8, verify ONNX validity, Q/DQ ops, and ORT execution."""
+    _, fp32_onnx_path = yolox_tiny_artifacts
+    frame_a = tmp_path / "calib_0.jpg"
+    frame_b = tmp_path / "calib_1.jpg"
+    frame_a.write_bytes(b"a")
+    frame_b.write_bytes(b"b")
+
+    rng = np.random.default_rng(77)
+    # Exercise both (C, H, W) and (1, C, H, W) shapes from preprocess_fn.
+    tensors = {
+        frame_a: rng.standard_normal((3, 160, 160)).astype(np.float32),
+        frame_b: rng.standard_normal((1, 3, 160, 160)).astype(np.float32),
+    }
+
+    qdq_path = quantize_onnx_qdq_int8(
+        onnx_path=fp32_onnx_path,
+        output_path=tmp_path / "yolox_s_160_int8_qdq.onnx",
+        calibration_frames=[frame_a, frame_b],
+        preprocess_fn=lambda path: tensors[path],
+        input_shape=(3, 160, 160),
+    )
+    assert qdq_path.exists()
+    onnx.checker.check_model(str(qdq_path))
+
+    qdq_model = onnx.load(str(qdq_path))
+    op_types = {node.op_type for node in qdq_model.graph.node}
+    assert "QuantizeLinear" in op_types
+    assert "DequantizeLinear" in op_types
+
+    session = ort.InferenceSession(str(qdq_path), providers=["CPUExecutionProvider"])
+    input_name = session.get_inputs()[0].name
+    expected_anchors = (160 // 8) ** 2 + (160 // 16) ** 2 + (160 // 32) ** 2
+    for batch_size in (1, 2):
+        sample = rng.standard_normal((batch_size, 3, 160, 160)).astype(np.float32)
+        out = np.asarray(session.run(None, {input_name: sample})[0], dtype=np.float32)
+        assert out.shape == (batch_size, expected_anchors, 85)
+        assert np.isfinite(out).all()
+
+
+def test_trt11_calibrator_import_and_builder_strongly_typed(
+    yolox_tiny_artifacts: tuple[YOLOXModel, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Confirm TensorRT 11+ (without IInt8EntropyCalibrator2/FP16/INT8 flags) imports and builds."""
+    import edge_vision_bench.export.trt_builder as trt_builder_mod
+    import edge_vision_bench.export.trt_calibrator as trt_calib_mod
+
+    # Verify importing trt_calibrator when tensorrt lacks IInt8EntropyCalibrator2 never crashes.
+    fake_trt11_module = types.ModuleType("tensorrt")
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt11_module)
+    reloaded_calib = importlib.reload(trt_calib_mod)
+    try:
+        assert reloaded_calib._CalibratorBase is object
+        monkeypatch.setattr(reloaded_calib, "cudart", object())
+        with pytest.raises(RuntimeError, match="TensorRT 11\\+"):
+            reloaded_calib.EntropyCalibrator(
+                calibration_frames=[],
+                preprocess_fn=lambda p: np.zeros((3, 160, 160), dtype=np.float32),
+                batch_size=1,
+                input_shape=(3, 160, 160),
+                cache_file=tmp_path / "calib.cache",
+            )
+    finally:
+        monkeypatch.delitem(sys.modules, "tensorrt", raising=False)
+        importlib.reload(trt_calib_mod)
+
+    # Verify TRT 11.x strongly-typed FP16 and explicit Q/DQ INT8 engine build paths.
+    parsed_paths: list[str] = []
+    network_flags_seen: list[int] = []
+    flags_set: list[str] = []
+
+    class _FakeProfile11:
+        def set_shape(
+            self,
+            _name: str,
+            min: tuple[int, ...],
+            opt: tuple[int, ...],
+            max: tuple[int, ...],
+        ) -> None:
+            del min, opt, max
+
+    class _FakeConfig11:
+        def set_memory_pool_limit(self, _pool_type: str, _size: int) -> None:
+            pass
+
+        def add_optimization_profile(self, _profile: _FakeProfile11) -> None:
+            pass
+
+        def set_flag(self, flag: str) -> None:
+            flags_set.append(flag)
+
+    class _FakeInput11:
+        name = "images"
+
+    class _FakeNetwork11:
+        def get_input(self, _idx: int) -> _FakeInput11:
+            return _FakeInput11()
+
+    class _FakeParser11:
+        num_errors = 0
+
+        def __init__(self, _network: _FakeNetwork11, _logger: Any) -> None:
+            pass
+
+        def parse_from_file(self, path: str) -> bool:
+            parsed_paths.append(path)
+            return True
+
+    class _FakeBuilder11:
+        def __init__(self, _logger: Any) -> None:
+            pass
+
+        def create_network(self, flags: int) -> _FakeNetwork11:
+            network_flags_seen.append(flags)
+            return _FakeNetwork11()
+
+        def create_builder_config(self) -> _FakeConfig11:
+            return _FakeConfig11()
+
+        def create_optimization_profile(self) -> _FakeProfile11:
+            return _FakeProfile11()
+
+        def build_serialized_network(
+            self,
+            _network: _FakeNetwork11,
+            _config: _FakeConfig11,
+        ) -> bytes:
+            return b"fake-trt11-engine"
+
+    class _FakeLogger11:
+        WARNING = 1
+
+        def __init__(self, _level: int) -> None:
+            pass
+
+    class _FakeTRT11:
+        Logger = _FakeLogger11
+        Builder = _FakeBuilder11
+        OnnxParser = _FakeParser11
+
+        class NetworkDefinitionCreationFlag:
+            pass
+
+        class MemoryPoolType:
+            WORKSPACE = "workspace"
+
+        class BuilderFlag:
+            pass
+
+    monkeypatch.setattr(trt_builder_mod, "trt", _FakeTRT11)
+
+    _, fp32_onnx_path = yolox_tiny_artifacts
+    local_onnx = tmp_path / "yolox_s_160.onnx"
+    local_onnx.write_bytes(fp32_onnx_path.read_bytes())
+
+    fp16_engine = build_trt_engine(
+        onnx_path=local_onnx,
+        engine_path=tmp_path / "yolox_fp16.engine",
+        precision="fp16",
+        input_shape=(3, 160, 160),
+    )
+    assert fp16_engine.read_bytes() == b"fake-trt11-engine"
+    assert Path(parsed_paths[-1]) == tmp_path / "yolox_s_160_fp16.onnx"
+    assert Path(parsed_paths[-1]).exists()
+
+    calib_frame = tmp_path / "calib_trt11.jpg"
+    calib_frame.write_bytes(b"img")
+    rng = np.random.default_rng(5)
+    int8_engine = build_trt_engine(
+        onnx_path=local_onnx,
+        engine_path=tmp_path / "yolox_int8.engine",
+        precision="int8",
+        input_shape=(3, 160, 160),
+        calibration_frames=[calib_frame],
+        preprocess_fn=lambda _p: rng.standard_normal((3, 160, 160)).astype(np.float32),
+    )
+    assert int8_engine.read_bytes() == b"fake-trt11-engine"
+    assert Path(parsed_paths[-1]) == tmp_path / "yolox_s_160_int8_qdq.onnx"
+    assert Path(parsed_paths[-1]).exists()
+    assert network_flags_seen == [0, 0]
+    assert flags_set == []
 
 
 @pytest.mark.slow

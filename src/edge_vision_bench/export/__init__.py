@@ -6,7 +6,7 @@ from edge_vision_bench.export.onnx_exporter import (
     verify_onnx_parity,
 )
 from edge_vision_bench.export.openvino_exporter import export_to_openvino
-from edge_vision_bench.export.trt_builder import build_trt_engine
+from edge_vision_bench.export.trt_builder import build_trt_engine, quantize_onnx_qdq_int8
 from edge_vision_bench.export.trt_calibrator import EntropyCalibrator
 
 __all__ = [
@@ -15,5 +15,6 @@ __all__ = [
     "convert_onnx_to_fp16",
     "export_to_onnx",
     "export_to_openvino",
+    "quantize_onnx_qdq_int8",
     "verify_onnx_parity",
 ]
