@@ -143,11 +143,34 @@ def quantize_onnx_qdq_int8(
         extra_options={
             "ActivationSymmetric": True,
             "WeightSymmetric": True,
+            "QuantizeBias": False,
+            "AddQDQPairToWeight": True,
+            "DedicatedQDQPair": True,
             "CalibStridedMinMax": calib_stride,
         },
     )
     onnx.checker.check_model(str(dest))
     return dest
+
+
+def _qdq_has_int32_dequant(onnx_path: Path) -> bool:
+    """Return True if any ``DequantizeLinear`` node in the graph consumes an ``INT32`` tensor."""
+    proto = onnx.load(str(onnx_path), load_external_data=False)
+    int32_tensors: set[str] = {
+        init.name for init in proto.graph.initializer if init.data_type == onnx.TensorProto.INT32
+    }
+    for value_info in proto.graph.value_info:
+        if value_info.type.tensor_type.elem_type == onnx.TensorProto.INT32:
+            int32_tensors.add(value_info.name)
+    for node in proto.graph.node:
+        if node.op_type == "Constant" and node.output:
+            for attr in node.attribute:
+                if attr.name == "value" and attr.t.data_type == onnx.TensorProto.INT32:
+                    int32_tensors.add(node.output[0])
+    return any(
+        node.op_type == "DequantizeLinear" and bool(node.input) and node.input[0] in int32_tensors
+        for node in proto.graph.node
+    )
 
 
 def build_trt_engine(
@@ -227,10 +250,18 @@ def build_trt_engine(
             parse_src = src
         else:
             qdq_path = src.with_name(f"{src.stem}_int8_qdq.onnx")
-            if not qdq_path.exists():
+            needs_regen = not qdq_path.exists()
+            if not needs_regen and _qdq_has_int32_dequant(qdq_path):
+                logger.warning(
+                    "Cached Q/DQ ONNX %s contains INT32 DequantizeLinear nodes incompatible with "
+                    "TensorRT; regenerating with QuantizeBias=False",
+                    qdq_path,
+                )
+                needs_regen = True
+            if needs_regen:
                 if not calibration_frames or preprocess_fn is None:
                     raise ValueError(
-                        "TensorRT 11+ INT8 build requires either an existing Q/DQ ONNX model "
+                        "TensorRT 11+ INT8 build requires either a compatible Q/DQ ONNX model "
                         "or both calibration_frames and preprocess_fn."
                     )
                 quantize_onnx_qdq_int8(

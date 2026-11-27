@@ -23,7 +23,11 @@ from edge_vision_bench.export.onnx_exporter import (
     verify_onnx_parity,
 )
 from edge_vision_bench.export.openvino_exporter import export_to_openvino
-from edge_vision_bench.export.trt_builder import build_trt_engine, quantize_onnx_qdq_int8
+from edge_vision_bench.export.trt_builder import (
+    _qdq_has_int32_dequant,
+    build_trt_engine,
+    quantize_onnx_qdq_int8,
+)
 from edge_vision_bench.export.trt_calibrator import EntropyCalibrator
 from edge_vision_bench.models.dinov2 import load_dinov2
 from edge_vision_bench.models.yolox import YOLOXModel, load_yolox
@@ -482,11 +486,34 @@ def test_quantize_onnx_qdq_int8_yolox(
     assert visited_frames == frames
     assert qdq_path.exists()
     onnx.checker.check_model(str(qdq_path))
+    assert not _qdq_has_int32_dequant(qdq_path)
 
     qdq_model = onnx.load(str(qdq_path))
     op_types = {node.op_type for node in qdq_model.graph.node}
     assert "QuantizeLinear" in op_types
     assert "DequantizeLinear" in op_types
+
+    # Verify _qdq_has_int32_dequant catches stale ORT graphs with INT32 bias DequantizeLinear.
+    stale_qdq = tmp_path / "stale_int32_qdq.onnx"
+    stale_graph = onnx.helper.make_graph(
+        nodes=[
+            onnx.helper.make_node(
+                "DequantizeLinear",
+                inputs=["bias_q", "bias_scale", "bias_zp"],
+                outputs=["bias_dq"],
+            )
+        ],
+        name="stale_int32_qdq",
+        inputs=[],
+        outputs=[onnx.helper.make_tensor_value_info("bias_dq", onnx.TensorProto.FLOAT, [1])],
+        initializer=[
+            onnx.helper.make_tensor("bias_q", onnx.TensorProto.INT32, [1], [1]),
+            onnx.helper.make_tensor("bias_scale", onnx.TensorProto.FLOAT, [1], [0.1]),
+            onnx.helper.make_tensor("bias_zp", onnx.TensorProto.INT32, [1], [0]),
+        ],
+    )
+    onnx.save(onnx.helper.make_model(stale_graph), str(stale_qdq))
+    assert _qdq_has_int32_dequant(stale_qdq)
 
     session = ort.InferenceSession(str(qdq_path), providers=["CPUExecutionProvider"])
     input_name = session.get_inputs()[0].name
