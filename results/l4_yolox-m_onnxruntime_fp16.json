@@ -1,0 +1,33 @@
+[
+  {
+    "model_name": "yolox-m",
+    "track": "detection",
+    "runtime": "onnxruntime",
+    "precision": "fp16",
+    "hardware_target": "NVIDIA L4",
+    "batch_size": 1,
+    "p50_compute_ms": 4.7762,
+    "p95_compute_ms": 5.0058,
+    "p99_compute_ms": 6.1303,
+    "p50_h2d_ms": 1.1848,
+    "p50_d2h_ms": 0.6808,
+    "p50_preproc_ms": 2.564,
+    "p50_postproc_ms": 2.2842,
+    "end_to_end_fps": 84.73,
+    "peak_vram_mb": 350.0,
+    "peak_ram_mb": 4098.58,
+    "artifact_size_mb": 48.419,
+    "clean_map50_95": 0.493,
+    "clean_map50": 0.6573,
+    "ood_blur_map50_95": 0.2528,
+    "ood_occlusion_map50_95": 0.2094,
+    "ood_lowlight_map50_95": 0.4378,
+    "clean_mota": 0.2117,
+    "clean_idf1": 0.467,
+    "ood_blur_mota": 0.123,
+    "embedding_cosine_sim": null,
+    "ood_blur_cosine_sim": null,
+    "ood_occlusion_cosine_sim": null,
+    "ood_lowlight_cosine_sim": null
+  }
+]

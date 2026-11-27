@@ -1,0 +1,33 @@
+[
+  {
+    "model_name": "dinov2-vits14",
+    "track": "embedding",
+    "runtime": "pytorch_compile",
+    "precision": "fp16",
+    "hardware_target": "NVIDIA L4",
+    "batch_size": 1,
+    "p50_compute_ms": 5.6966,
+    "p95_compute_ms": 6.0163,
+    "p99_compute_ms": 6.1192,
+    "p50_h2d_ms": 0.6612,
+    "p50_d2h_ms": 0.067,
+    "p50_preproc_ms": 7.3561,
+    "p50_postproc_ms": 0.0452,
+    "end_to_end_fps": 71.52,
+    "peak_vram_mb": 468.0,
+    "peak_ram_mb": 2178.6,
+    "artifact_size_mb": 0.0,
+    "clean_map50_95": null,
+    "clean_map50": null,
+    "ood_blur_map50_95": null,
+    "ood_occlusion_map50_95": null,
+    "ood_lowlight_map50_95": null,
+    "clean_mota": null,
+    "clean_idf1": null,
+    "ood_blur_mota": null,
+    "embedding_cosine_sim": 0.99999,
+    "ood_blur_cosine_sim": 0.72081,
+    "ood_occlusion_cosine_sim": 0.87184,
+    "ood_lowlight_cosine_sim": 0.94982
+  }
+]
