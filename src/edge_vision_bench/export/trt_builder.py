@@ -56,6 +56,7 @@ def quantize_onnx_qdq_int8(
     if not calibration_frames:
         raise ValueError("calibration_frames must be non-empty for Q/DQ INT8 quantization")
 
+    import onnxruntime as ort
     from onnxruntime.quantization import (
         CalibrationDataReader,
         CalibrationMethod,
@@ -70,10 +71,20 @@ def quantize_onnx_qdq_int8(
 
     class _FrameCalibrationReader(CalibrationDataReader):  # type: ignore[misc]
         def __init__(self) -> None:
+            self._start = 0
+            self._end = len(frames)
             self._index = 0
 
+        def __len__(self) -> int:
+            return len(frames)
+
+        def set_range(self, start_index: int, end_index: int) -> None:
+            self._start = start_index
+            self._end = min(end_index, len(frames))
+            self._index = start_index
+
         def get_next(self) -> dict[str, np.ndarray] | None:
-            if self._index >= len(frames):
+            if self._index >= self._end:
                 return None
             frame_path = frames[self._index]
             self._index += 1
@@ -99,13 +110,24 @@ def quantize_onnx_qdq_int8(
             return {input_name: np.ascontiguousarray(arr, dtype=np.float32)}
 
         def rewind(self) -> None:
-            self._index = 0
+            self._index = self._start
+
+    calib_stride = max(d for d in range(1, min(8, len(frames)) + 1) if len(frames) % d == 0)
+    available_providers = ort.get_available_providers()
+    calibration_providers = (
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        if "CUDAExecutionProvider" in available_providers
+        else ["CPUExecutionProvider"]
+    )
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     logger.info(
-        "Quantizing %s to explicit Q/DQ INT8 ONNX (%d calibration frames) -> %s",
+        "Quantizing %s to explicit Q/DQ INT8 ONNX (%d calibration frames, stride=%d, providers=%s) "
+        "-> %s",
         src,
         len(frames),
+        calib_stride,
+        calibration_providers,
         dest,
     )
     quantize_static(
@@ -116,8 +138,13 @@ def quantize_onnx_qdq_int8(
         activation_type=QuantType.QInt8,
         weight_type=QuantType.QInt8,
         calibrate_method=CalibrationMethod.Entropy,
+        calibration_providers=calibration_providers,
         op_types_to_quantize=["Conv", "MatMul", "Gemm"],
-        extra_options={"ActivationSymmetric": True, "WeightSymmetric": True},
+        extra_options={
+            "ActivationSymmetric": True,
+            "WeightSymmetric": True,
+            "CalibStridedMinMax": calib_stride,
+        },
     )
     onnx.checker.check_model(str(dest))
     return dest

@@ -452,27 +452,34 @@ def test_quantize_onnx_qdq_int8_yolox(
     yolox_tiny_artifacts: tuple[YOLOXModel, Path],
     tmp_path: Path,
 ) -> None:
-    """Quantize tiny YOLOX ONNX to Q/DQ INT8, verify ONNX validity, Q/DQ ops, and ORT execution."""
+    """Quantize tiny YOLOX ONNX to Q/DQ INT8 across 3 strided chunks and verify ORT execution."""
     _, fp32_onnx_path = yolox_tiny_artifacts
-    frame_a = tmp_path / "calib_0.jpg"
-    frame_b = tmp_path / "calib_1.jpg"
-    frame_a.write_bytes(b"a")
-    frame_b.write_bytes(b"b")
-
     rng = np.random.default_rng(77)
-    # Exercise both (C, H, W) and (1, C, H, W) shapes from preprocess_fn.
-    tensors = {
-        frame_a: rng.standard_normal((3, 160, 160)).astype(np.float32),
-        frame_b: rng.standard_normal((1, 3, 160, 160)).astype(np.float32),
-    }
+
+    # 9 frames -> calib_stride=3, exercising 3 distinct set_range + collect_data chunks.
+    frames: list[Path] = []
+    tensors: dict[Path, np.ndarray] = {}
+    for idx in range(9):
+        frame_path = tmp_path / f"calib_{idx}.jpg"
+        frame_path.write_bytes(f"frame-{idx}".encode())
+        frames.append(frame_path)
+        shape = (3, 160, 160) if idx % 2 == 0 else (1, 3, 160, 160)
+        tensors[frame_path] = rng.standard_normal(shape).astype(np.float32)
+
+    visited_frames: list[Path] = []
+
+    def _preprocess(path: Path) -> np.ndarray:
+        visited_frames.append(path)
+        return tensors[path]
 
     qdq_path = quantize_onnx_qdq_int8(
         onnx_path=fp32_onnx_path,
         output_path=tmp_path / "yolox_s_160_int8_qdq.onnx",
-        calibration_frames=[frame_a, frame_b],
-        preprocess_fn=lambda path: tensors[path],
+        calibration_frames=frames,
+        preprocess_fn=_preprocess,
         input_shape=(3, 160, 160),
     )
+    assert visited_frames == frames
     assert qdq_path.exists()
     onnx.checker.check_model(str(qdq_path))
 
